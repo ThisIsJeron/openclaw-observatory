@@ -1,6 +1,7 @@
 {
   "name": "openclaw-observatory",
   "version": "1.0.0",
+  "type": "module",
   "description": "Self-hosted observability platform for Clawdbot/OpenClaw agents",
   "main": "dist/index.js",
   "scripts": {

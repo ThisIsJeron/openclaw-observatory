@@ -44,7 +44,7 @@ export async function registerWebSocketRoutes(app: FastifyInstance): Promise<voi
     }));
 
     // Handle messages from client
-    socket.on('message', (data) => {
+    socket.on('message', (data: Buffer | ArrayBuffer | Buffer[]) => {
       try {
         const message = JSON.parse(data.toString());
 
@@ -73,7 +73,7 @@ export async function registerWebSocketRoutes(app: FastifyInstance): Promise<voi
     });
 
     // Handle errors
-    socket.on('error', (err) => {
+    socket.on('error', (err: Error) => {
       console.error('WebSocket error:', err);
       clients.delete(socket);
     });

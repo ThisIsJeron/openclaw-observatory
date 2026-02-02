@@ -45,7 +45,7 @@ export default function EventTimeline({ events }: EventTimelineProps) {
       {/* Timeline line */}
       <div className="absolute left-4 top-0 bottom-0 w-0.5 bg-slate-700" />
 
-      {events.map((event, index) => {
+      {events.map((event) => {
         const style = getEventStyle(event.eventType);
         const isExpanded = expandedEvents.has(event.id);
         const hasDetails = event.tokens || event.timing || event.tool || event.error || event.payload;

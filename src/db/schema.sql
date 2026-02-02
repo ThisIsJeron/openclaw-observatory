@@ -6,7 +6,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- Main events table (hypertable for time-series)
 CREATE TABLE IF NOT EXISTS events (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id UUID NOT NULL DEFAULT gen_random_uuid(),
   timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   event_type TEXT NOT NULL,
   gateway_id TEXT NOT NULL,
@@ -50,7 +50,10 @@ CREATE TABLE IF NOT EXISTS events (
   cost_total REAL,
 
   -- Payloads (JSONB for flexibility)
-  payload JSONB
+  payload JSONB,
+  
+  -- Composite primary key for TimescaleDB compatibility
+  PRIMARY KEY (id, timestamp)
 );
 
 -- Convert to hypertable (if timescaledb is available)
