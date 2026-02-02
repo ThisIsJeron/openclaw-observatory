@@ -1,0 +1,58 @@
+version: "3.8"
+
+services:
+  observatory:
+    image: ghcr.io/thisisjeron/openclaw-observatory:latest
+    build: .
+    ports:
+      - "3200:3200"
+    environment:
+      - DATABASE_URL=postgres://observatory:observatory@timescaledb:5432/observatory
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-}
+      - OBSERVATORY_TOKEN=${OBSERVATORY_TOKEN:-}
+      - RETENTION_DAYS=${RETENTION_DAYS:-30}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3200/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      - POSTGRES_USER=observatory
+      - POSTGRES_PASSWORD=observatory
+      - POSTGRES_DB=observatory
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U observatory -d observatory"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_INSTALL_PLUGINS=grafana-clock-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - timescaledb
+    restart: unless-stopped
+    profiles:
+      - full
+
+volumes:
+  timescaledb_data:
+  grafana_data:
