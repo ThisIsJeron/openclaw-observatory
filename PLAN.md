@@ -1,6 +1,16 @@
 # OpenClaw Observatory - Design Plan
 
-**Goal:** Full observability for Clawdbot/OpenClaw agents — know what's happening, catch failures before users do.
+**Goal:** Self-hosted observability platform for Clawdbot/OpenClaw agents — monitor context windows, failures, costs, and agent state across one or many gateway instances.
+
+---
+
+## Design Principles
+
+1. **Docker-first** — Single `docker-compose up` deploys everything
+2. **Self-hosted** — Runs in your LXC, VPS, or Mac mini — your data stays yours
+3. **Multi-gateway** — Monitor multiple OpenClaw instances from one Observatory
+4. **Decoupled** — Observatory is a separate service, not bundled with Clawdbot
+5. **Batteries included** — Works out of the box, optional Grafana for power users
 
 ---
 
@@ -11,58 +21,147 @@ Right now, agents are black boxes:
 - **Silent failures** — agents die without warning or useful diagnostics
 - **Context window blindness** — no way to know when approaching limits until it's too late
 - **Hung agents** — subagents get stuck with no indication to parent sessions
+- **Cost opacity** — no aggregate view of API spend across sessions
 
 ---
 
 ## Architecture
 
+### Deployment Model
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  LXC / VM / Mac mini: Observatory                                │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │  docker-compose                                             │ │
+│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────────────┐ │ │
+│  │  │ observatory  │ │ timescaledb  │ │ grafana (optional)   │ │ │
+│  │  │ :3200        │ │ :5432        │ │ :3000                │ │ │
+│  │  │ - collector  │ │ - events     │ │ - dashboards         │ │ │
+│  │  │ - web UI     │ │ - metrics    │ │ - alerting           │ │ │
+│  │  │ - alerts     │ │ - retention  │ │                      │ │ │
+│  │  └──────────────┘ └──────────────┘ └──────────────────────┘ │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────┘
+         ▲                    ▲                    ▲
+         │ HTTP POST /ingest  │                    │
+         │                    │                    │
+┌────────┴───────┐   ┌───────┴────────┐   ┌──────┴───────┐
+│ LXC: OpenClaw  │   │ LXC: OpenClaw  │   │ Mac: OpenClaw│
+│ (gateway #1)   │   │ (gateway #2)   │   │ (gateway #3) │
+└────────────────┘   └────────────────┘   └──────────────┘
+```
+
 ### Event Flow
 
+1. **Gateway instrumentation** — Clawdbot emits events via HTTP POST to Observatory
+2. **Collector service** — Receives, validates, enriches events
+3. **TimescaleDB** — Time-series optimized storage with automatic retention
+4. **Web UI** — Built-in dashboard for real-time monitoring and debugging
+5. **Grafana** — Optional, for advanced dashboards and alerting
+
+---
+
+## Docker Compose Stack
+
+```yaml
+version: "3.8"
+
+services:
+  observatory:
+    image: ghcr.io/thisisjeron/openclaw-observatory:latest
+    build: .
+    ports:
+      - "3200:3200"
+    environment:
+      - DATABASE_URL=postgres://observatory:observatory@timescaledb:5432/observatory
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL:-}
+      - AUTH_TOKEN=${OBSERVATORY_TOKEN:-}
+    depends_on:
+      - timescaledb
+    restart: unless-stopped
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      - POSTGRES_USER=observatory
+      - POSTGRES_PASSWORD=observatory
+      - POSTGRES_DB=observatory
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_INSTALL_PLUGINS=grafana-clock-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - timescaledb
+    restart: unless-stopped
+    profiles:
+      - full  # Only starts with --profile full
+
+volumes:
+  timescaledb_data:
+  grafana_data:
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  Clawdbot GW    │────▶│  Observatory     │────▶│  Storage        │
-│  (instrumented) │     │  Collector       │     │  (SQLite/PG)    │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
-                                │
-                                ▼
-                        ┌──────────────────┐
-                        │  Alert Engine    │
-                        │  + Dashboard     │
-                        └──────────────────┘
+
+### Quick Start
+
+```bash
+# Minimal (Observatory + TimescaleDB)
+docker-compose up -d
+
+# Full stack (+ Grafana)
+docker-compose --profile full up -d
 ```
 
-### Instrumentation Points in Clawdbot
+---
 
-1. **Session lifecycle** (`gateway/sessions.ts`)
-   - `session.created` — new session spawned
-   - `session.resumed` — existing session resumed
-   - `session.ended` — session closed (reason: user/timeout/error/context_overflow)
+## Observatory Service
 
-2. **Agent turns** (`gateway/agent.ts`)
-   - `turn.started` — user/system message received
-   - `turn.completed` — agent response generated
-   - `turn.failed` — error during turn
+### Tech Stack
 
-3. **Tool calls** (`gateway/tools.ts`)
-   - `tool.invoked` — tool call initiated
-   - `tool.completed` — tool returned result
-   - `tool.failed` — tool error/timeout
+- **Runtime:** Node.js 20+ (TypeScript)
+- **Framework:** Fastify (fast, low overhead)
+- **Database:** TimescaleDB (Postgres + time-series extensions)
+- **Web UI:** React + Tailwind (embedded, served by Fastify)
+- **WebSocket:** Real-time event streaming to dashboard
 
-4. **Subagent spawns** (`tools/sessions_spawn.ts`)
-   - `subagent.spawned` — child session created
-   - `subagent.completed` — child finished
-   - `subagent.failed` — child error/timeout
+### API Endpoints
 
-5. **Context window** (`gateway/context.ts`)
-   - `context.measured` — after each turn, log token counts
-   - `context.warning` — threshold exceeded (80%, 95%)
-   - `context.overflow` — hit limit, context truncated/failed
+#### Event Ingestion
+```
+POST /api/v1/ingest
+Authorization: Bearer <token>
+Content-Type: application/json
 
-6. **Cron/Heartbeat** (`gateway/cron.ts`)
-   - `cron.triggered` — job fired
-   - `cron.completed` — job finished
-   - `heartbeat.poll` — heartbeat check
-   - `heartbeat.response` — agent replied (or timed out)
+{
+  "events": [ObservatoryEvent, ...]
+}
+```
+
+#### Query API
+```
+GET  /api/v1/sessions                    # List sessions
+GET  /api/v1/sessions/:key               # Session details
+GET  /api/v1/sessions/:key/events        # Session events
+GET  /api/v1/events?type=turn.completed  # Query events
+GET  /api/v1/metrics/summary             # Aggregate metrics
+GET  /api/v1/health                      # Health check
+```
+
+#### WebSocket
+```
+WS /api/v1/stream
+# Real-time event feed for dashboard
+```
 
 ---
 
@@ -71,17 +170,18 @@ Right now, agents are black boxes:
 ```typescript
 interface ObservatoryEvent {
   // Identity
-  id: string;              // UUID
-  timestamp: string;       // ISO8601
-  eventType: string;       // e.g., "turn.completed"
+  id: string;                    // UUID
+  timestamp: string;             // ISO8601
+  eventType: string;             // e.g., "turn.completed"
+  gatewayId: string;             // Which gateway sent this
   
   // Session context
-  sessionKey: string;      // Primary session identifier
-  parentSessionKey?: string; // If subagent
-  agentId?: string;        // Agent config used
-  channel?: string;        // telegram, discord, webchat, etc.
+  sessionKey: string;
+  parentSessionKey?: string;     // If subagent
+  agentId?: string;
+  channel?: string;              // telegram, discord, webchat, etc.
   
-  // Turn context (when applicable)
+  // Turn context
   turnId?: string;
   messageId?: string;
   
@@ -90,9 +190,9 @@ interface ObservatoryEvent {
     input: number;
     output: number;
     total: number;
-    contextUsed: number;   // Current context window usage
-    contextMax: number;    // Model's max context
-    percentUsed: number;   // contextUsed / contextMax
+    contextUsed: number;
+    contextMax: number;
+    percentUsed: number;
   };
   
   // Timing
@@ -100,20 +200,20 @@ interface ObservatoryEvent {
     startMs: number;
     endMs: number;
     durationMs: number;
-    timeToFirstTokenMs?: number;
+    ttftMs?: number;             // Time to first token
   };
   
-  // Tool calls (when applicable)
+  // Tool calls
   tool?: {
     name: string;
-    parameters: Record<string, unknown>;
+    parameters?: Record<string, unknown>;
     result?: unknown;
     error?: string;
   };
   
-  // Error details (when applicable)
+  // Error details
   error?: {
-    type: string;         // timeout, context_overflow, api_error, tool_error
+    type: string;               // timeout, context_overflow, api_error, tool_error
     message: string;
     stack?: string;
     retriable: boolean;
@@ -121,253 +221,413 @@ interface ObservatoryEvent {
   
   // Model info
   model?: {
-    provider: string;     // anthropic, openai, etc.
-    modelId: string;      // claude-opus-4-5, gpt-5.2, etc.
-    thinking?: string;    // off, low, high
+    provider: string;
+    modelId: string;
+    thinking?: string;
   };
   
   // Cost tracking
   cost?: {
-    inputCost: number;    // USD
+    inputCost: number;          // USD
     outputCost: number;
     totalCost: number;
   };
   
-  // Raw payloads (opt-in, can be huge)
+  // Payloads (opt-in)
   payload?: {
     userMessage?: string;
     assistantMessage?: string;
-    systemPrompt?: string;
-    fullContext?: unknown; // Entire messages array
   };
+}
+```
+
+### Event Types
+
+| Event | Description |
+|-------|-------------|
+| `session.created` | New session spawned |
+| `session.ended` | Session closed |
+| `turn.started` | User/system message received |
+| `turn.completed` | Agent response generated |
+| `turn.failed` | Error during turn |
+| `tool.invoked` | Tool call initiated |
+| `tool.completed` | Tool returned result |
+| `tool.failed` | Tool error/timeout |
+| `subagent.spawned` | Child session created |
+| `subagent.completed` | Child finished |
+| `subagent.failed` | Child error/timeout |
+| `context.warning` | 80%+ context used |
+| `context.overflow` | Context limit hit |
+| `cron.triggered` | Cron job fired |
+| `heartbeat.poll` | Heartbeat check |
+
+---
+
+## Database Schema (TimescaleDB)
+
+```sql
+-- Main events table (hypertable for time-series)
+CREATE TABLE events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  timestamp TIMESTAMPTZ NOT NULL,
+  event_type TEXT NOT NULL,
+  gateway_id TEXT NOT NULL,
+  session_key TEXT NOT NULL,
+  parent_session_key TEXT,
+  agent_id TEXT,
+  channel TEXT,
+  turn_id TEXT,
+  
+  -- Token metrics
+  tokens_input INTEGER,
+  tokens_output INTEGER,
+  tokens_context_used INTEGER,
+  tokens_context_max INTEGER,
+  tokens_percent_used REAL,
+  
+  -- Timing
+  duration_ms INTEGER,
+  ttft_ms INTEGER,
+  
+  -- Tool
+  tool_name TEXT,
+  tool_error TEXT,
+  
+  -- Error
+  error_type TEXT,
+  error_message TEXT,
+  
+  -- Model
+  model_provider TEXT,
+  model_id TEXT,
+  
+  -- Cost
+  cost_total REAL,
+  
+  -- Payloads (JSONB for flexibility)
+  payload JSONB
+);
+
+-- Convert to hypertable
+SELECT create_hypertable('events', 'timestamp');
+
+-- Retention policy (default 30 days)
+SELECT add_retention_policy('events', INTERVAL '30 days');
+
+-- Indexes
+CREATE INDEX idx_events_session ON events (session_key, timestamp DESC);
+CREATE INDEX idx_events_type ON events (event_type, timestamp DESC);
+CREATE INDEX idx_events_gateway ON events (gateway_id, timestamp DESC);
+CREATE INDEX idx_events_error ON events (error_type) WHERE error_type IS NOT NULL;
+
+-- Continuous aggregates for fast dashboards
+CREATE MATERIALIZED VIEW hourly_metrics
+WITH (timescaledb.continuous) AS
+SELECT
+  time_bucket('1 hour', timestamp) AS hour,
+  gateway_id,
+  COUNT(*) FILTER (WHERE event_type = 'turn.completed') AS turns,
+  COUNT(*) FILTER (WHERE error_type IS NOT NULL) AS errors,
+  SUM(cost_total) AS total_cost,
+  AVG(tokens_percent_used) AS avg_context_pct,
+  AVG(duration_ms) AS avg_duration_ms,
+  COUNT(DISTINCT session_key) AS unique_sessions
+FROM events
+GROUP BY hour, gateway_id;
+```
+
+---
+
+## Web UI Features
+
+### Dashboard Views
+
+1. **Overview**
+   - Active sessions count (per gateway)
+   - Turns/hour, errors/hour, cost/hour
+   - Context usage heatmap
+   - Recent alerts
+
+2. **Sessions List**
+   - Searchable/filterable table
+   - Status indicators (active, idle, error, ended)
+   - Token usage bar
+   - Quick actions (view, debug)
+
+3. **Session Drilldown**
+   - Full conversation timeline
+   - Token usage per turn (stacked bar)
+   - Tool calls with timing
+   - Error details
+   - Subagent tree view
+   - Cost breakdown
+
+4. **Alerts**
+   - Active alerts
+   - Alert history
+   - Rule configuration
+
+5. **Settings**
+   - Gateway management
+   - Retention settings
+   - Alert rules
+   - API tokens
+
+---
+
+## Alerting
+
+### Built-in Alert Rules
+
+```yaml
+alerts:
+  context_warning:
+    condition: tokens_percent_used > 0.8
+    severity: warning
+    message: "Session {session_key} at {percent}% context"
+    
+  context_critical:
+    condition: tokens_percent_used > 0.95
+    severity: critical
+    message: "Session {session_key} near context limit!"
+    
+  hung_agent:
+    condition: turn_duration > 300s AND NOT completed
+    severity: critical
+    message: "Agent hung in session {session_key}"
+    
+  error_spike:
+    condition: error_rate > 0.1 over 5m
+    severity: warning
+    message: "Error rate spike on {gateway_id}"
+    
+  cost_spike:
+    condition: hourly_cost > 2x rolling_avg
+    severity: warning
+    message: "Cost spike: ${cost} in last hour"
+```
+
+### Alert Delivery
+
+- **Webhook** — POST to any URL (Slack, Discord, PagerDuty, etc.)
+- **Clawdbot** — Send to a Clawdbot channel (uses message tool)
+- **Email** — SMTP integration (optional)
+
+---
+
+## Clawdbot Gateway Integration
+
+### Configuration
+
+```yaml
+# In Clawdbot's config.yml
+observatory:
+  enabled: true
+  endpoint: "http://observatory.local:3200/api/v1/ingest"
+  token: "your-auth-token"
+  gatewayId: "clawdbot-main"       # Identifies this gateway
+  batchSize: 10                     # Events per batch
+  flushIntervalMs: 5000             # Max time between flushes
+  capturePayloads: false            # Include message content (privacy)
+  captureToolParams: true           # Include tool parameters
+```
+
+### Instrumentation (Clawdbot side)
+
+```typescript
+// observatory-client.ts
+class ObservatoryClient {
+  private queue: ObservatoryEvent[] = [];
+  
+  emit(event: Partial<ObservatoryEvent>) {
+    this.queue.push({
+      id: randomUUID(),
+      timestamp: new Date().toISOString(),
+      gatewayId: this.config.gatewayId,
+      ...event
+    });
+    
+    if (this.queue.length >= this.config.batchSize) {
+      this.flush();
+    }
+  }
+  
+  async flush() {
+    if (this.queue.length === 0) return;
+    const events = this.queue.splice(0);
+    await fetch(this.config.endpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.config.token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ events })
+    });
+  }
 }
 ```
 
 ---
 
-## Key Metrics to Track
-
-### Per-Turn Metrics
-| Metric | Description | Alert Threshold |
-|--------|-------------|-----------------|
-| `tokens.percentUsed` | Context window % | 80% warn, 95% crit |
-| `timing.durationMs` | Total turn time | >60s warn, >180s crit |
-| `timing.timeToFirstTokenMs` | TTFT | >10s warn |
-| `tool.durationMs` | Per-tool latency | >30s warn |
-
-### Session Metrics
-| Metric | Description | Alert Threshold |
-|--------|-------------|-----------------|
-| `turns_count` | Turns in session | >50 warn (context risk) |
-| `error_rate` | Errors / total turns | >10% warn |
-| `subagent_depth` | Nested subagent level | >3 warn |
-
-### System Metrics
-| Metric | Description | Alert Threshold |
-|--------|-------------|-----------------|
-| `active_sessions` | Concurrent sessions | Capacity planning |
-| `hourly_cost` | API spend | Budget alerts |
-| `hung_sessions` | No response >5min | Any = crit |
-
----
-
-## Alerting Rules
-
-### Critical (immediate notification)
-- **Context overflow** — session hit token limit
-- **Hung agent** — no response for >5 minutes during active turn
-- **Repeated failures** — >3 consecutive errors in session
-- **Subagent cascade** — subagent spawns >5 levels deep
-
-### Warning (digest or dashboard)
-- **Context warning** — >80% context used
-- **Slow turns** — >60s response time
-- **Tool failures** — any tool error
-- **Cost spike** — hourly spend >2x rolling average
-
-### Informational (logged only)
-- Session start/end
-- Subagent spawn/complete
-- Heartbeat activity
-
----
-
-## Storage Options
-
-### Phase 1: SQLite (local dev)
-```sql
-CREATE TABLE events (
-  id TEXT PRIMARY KEY,
-  timestamp TEXT NOT NULL,
-  event_type TEXT NOT NULL,
-  session_key TEXT NOT NULL,
-  parent_session_key TEXT,
-  tokens_input INTEGER,
-  tokens_output INTEGER,
-  tokens_percent_used REAL,
-  duration_ms INTEGER,
-  error_type TEXT,
-  error_message TEXT,
-  tool_name TEXT,
-  model_id TEXT,
-  cost_total REAL,
-  payload JSON
-);
-
-CREATE INDEX idx_events_session ON events(session_key);
-CREATE INDEX idx_events_type ON events(event_type);
-CREATE INDEX idx_events_timestamp ON events(timestamp);
-```
-
-### Phase 2+: TimescaleDB or ClickHouse
-- TimescaleDB: Easy Postgres upgrade path, good for time-series
-- ClickHouse: Better for high-volume, complex aggregations
-
----
-
-## Dashboard Views
-
-### 1. Real-Time Activity
-- Active sessions list with status indicators
-- Live event stream (filterable)
-- Token usage gauges per session
-- Error rate sparklines
-
-### 2. Session Drilldown
-- Full conversation history with token counts per turn
-- Tool call timeline with success/failure
-- Context window usage over time (line chart)
-- Cost breakdown
-- Parent/child session relationships (tree view)
-
-### 3. Historical Analytics
-- Daily/weekly turn counts, error rates, costs
-- Model usage distribution
-- Most expensive sessions
-- Most common error types
-- Average context utilization by agent
-
-### 4. Debugging View
-- "Why did this fail?" — single-session forensics
-- Full payload viewer (messages, tools, context)
-- Timeline with all events
-- Compare to successful similar sessions
-
----
-
 ## Implementation Phases
 
-### Phase 1: Event Logging (Week 1-2)
-**Goal:** Get events flowing to SQLite
+### Phase 1: Core Infrastructure (Week 1)
+**Goal:** Docker stack + event ingestion + basic UI
 
-- [ ] Define TypeScript interfaces for events
-- [ ] Add instrumentation hooks in Clawdbot gateway
-- [ ] SQLite storage backend
-- [ ] Basic CLI for querying events: `clawdbot observatory list --session X`
-- [ ] Environment toggle: `OBSERVATORY_ENABLED=true`
+- [ ] Project scaffolding (TypeScript, Fastify, React)
+- [ ] Docker Compose setup (Observatory + TimescaleDB)
+- [ ] Database schema + migrations
+- [ ] Ingest API endpoint
+- [ ] Health check endpoint
+- [ ] Basic web UI shell
 
 **Deliverables:**
-- Events written to `~/.clawdbot/observatory.db`
-- Can query recent events from CLI
+- `docker-compose up` works
+- Can POST events and see them in DB
+- Health endpoint returns status
 
-### Phase 2: Web Dashboard (Week 3-4)
-**Goal:** Visual exploration of events
+### Phase 2: Dashboard (Week 2)
+**Goal:** Useful monitoring UI
 
-- [ ] Simple web UI (React + Tailwind or similar)
-- [ ] Real-time WebSocket feed for live events
-- [ ] Session list with search/filter
+- [ ] Sessions list view
 - [ ] Session drilldown view
+- [ ] Real-time WebSocket feed
 - [ ] Token usage visualization
+- [ ] Error highlighting
 
 **Deliverables:**
-- `clawdbot observatory serve` starts local dashboard
-- Can drill into any session and see full history
+- Can browse sessions and see conversation history
+- Real-time updates when events arrive
 
-### Phase 3: Alerting (Week 5-6)
+### Phase 3: Clawdbot Integration (Week 3)
+**Goal:** Events flowing from real gateways
+
+- [ ] Observatory client library for Clawdbot
+- [ ] Instrument key Clawdbot events
+- [ ] Gateway registration/discovery
+- [ ] Multi-gateway support in UI
+
+**Deliverables:**
+- Configure Clawdbot to send events
+- See real session data in Observatory
+
+### Phase 4: Alerting (Week 4)
 **Goal:** Proactive notifications
 
-- [ ] Alert rule engine (config-driven)
-- [ ] Integration with Clawdbot's notification system
-- [ ] Telegram/Discord/webhook alert delivery
-- [ ] Alert suppression and rate limiting
+- [ ] Alert rule engine
+- [ ] Webhook delivery
+- [ ] Clawdbot channel delivery
+- [ ] Alert UI (configure, view, silence)
 
 **Deliverables:**
 - Alerts fire when thresholds crossed
-- Configurable via `~/.clawdbot/config.yml`
+- Notifications delivered to configured destinations
 
-### Phase 4: Advanced Analytics (Week 7+)
-**Goal:** Insights and optimization
+### Phase 5: Polish & Grafana (Week 5+)
+**Goal:** Production-ready
 
-- [ ] Cost attribution by session/user/agent
-- [ ] Anomaly detection (unusual patterns)
-- [ ] Session replay (recreate conversation)
-- [ ] Performance recommendations
-- [ ] Export to external observability (Datadog, Grafana)
-
----
-
-## Open Questions
-
-1. **Payload storage:** Full messages can be huge. Store by default or opt-in?
-2. **Retention:** How long to keep events? 7 days? 30 days? Configurable?
-3. **Multi-instance:** If running multiple Clawdbot gateways, central collector?
-4. **Privacy:** Some sessions have sensitive data. Redaction options?
-5. **Performance:** Will instrumentation add latency? (Probably negligible, but measure)
+- [ ] Grafana provisioned dashboards
+- [ ] Performance optimization
+- [ ] Documentation
+- [ ] Helm chart (for Kubernetes users)
+- [ ] One-line install script
 
 ---
 
-## Clawdbot Integration Points
+## File Structure
 
-### Gateway Hooks Needed
-```typescript
-// In gateway/agent.ts
-observatory.emit('turn.started', { sessionKey, turnId, tokens: countTokens(messages) });
-// ... after completion
-observatory.emit('turn.completed', { sessionKey, turnId, tokens, timing, cost });
-
-// In gateway/tools.ts
-observatory.emit('tool.invoked', { sessionKey, tool: name, params });
-observatory.emit('tool.completed', { sessionKey, tool: name, result, timing });
-
-// In tools/sessions_spawn.ts
-observatory.emit('subagent.spawned', { parentSessionKey, childSessionKey, task });
+```
+openclaw-observatory/
+├── docker-compose.yml
+├── Dockerfile
+├── package.json
+├── tsconfig.json
+├── .env.example
+├── src/
+│   ├── index.ts              # Entry point
+│   ├── config.ts             # Configuration
+│   ├── db/
+│   │   ├── schema.sql
+│   │   ├── migrations/
+│   │   └── client.ts
+│   ├── api/
+│   │   ├── ingest.ts
+│   │   ├── sessions.ts
+│   │   ├── events.ts
+│   │   ├── metrics.ts
+│   │   └── websocket.ts
+│   ├── alerts/
+│   │   ├── engine.ts
+│   │   ├── rules.ts
+│   │   └── delivery.ts
+│   └── types/
+│       └── events.ts
+├── web/                      # React frontend
+│   ├── src/
+│   │   ├── App.tsx
+│   │   ├── pages/
+│   │   ├── components/
+│   │   └── hooks/
+│   └── package.json
+├── grafana/
+│   └── provisioning/
+│       ├── dashboards/
+│       └── datasources/
+└── scripts/
+    └── install.sh            # One-line installer
 ```
 
-### Config Schema Addition
-```yaml
-observatory:
-  enabled: true
-  storage: sqlite  # or postgres, clickhouse
-  dbPath: ~/.clawdbot/observatory.db
-  retention: 30d
-  capturePayloads: false  # Privacy-conscious default
-  alerts:
-    contextWarning: 0.8
-    contextCritical: 0.95
-    hungTimeoutSec: 300
+---
+
+## Configuration
+
+### Environment Variables
+
+```bash
+# .env
+DATABASE_URL=postgres://observatory:observatory@timescaledb:5432/observatory
+OBSERVATORY_TOKEN=your-secret-token    # For API auth
+ALERT_WEBHOOK_URL=https://hooks.slack.com/...
+GRAFANA_PASSWORD=admin
+RETENTION_DAYS=30
+LOG_LEVEL=info
 ```
 
 ---
 
 ## Success Criteria
 
-After Phase 2, you should be able to:
-1. See all active sessions and their status
-2. Drill into any session and see every message, tool call, and token count
-3. Know immediately when an agent hits context limits
-4. Debug "why did my agent fail?" in <30 seconds
+**After Phase 2:**
+- [ ] `docker-compose up` deploys working Observatory
+- [ ] Can browse sessions and see full conversation history
+- [ ] Real-time event streaming works
+- [ ] Token usage clearly visualized
 
-After Phase 4:
-1. Get alerts before users notice problems
-2. Track costs per session/agent
-3. Identify optimization opportunities (e.g., "this agent uses 2x tokens than average")
-4. Replay and compare sessions for debugging
+**After Phase 4:**
+- [ ] Multiple gateways sending events to single Observatory
+- [ ] Alerts fire when agents hit context limits
+- [ ] Debug "why did this fail?" in <30 seconds
+- [ ] Cost tracking across all sessions
+
+**After Phase 5:**
+- [ ] One-command install for LXC/Docker
+- [ ] Grafana dashboards pre-configured
+- [ ] Documentation complete
+- [ ] Ready for others to self-host
+
+---
+
+## Open Questions
+
+1. **Auth model:** Single token per Observatory, or per-gateway tokens?
+2. **Payload storage:** Store message content by default? (Privacy vs debugging)
+3. **Multi-tenant:** Support multiple users/orgs in one Observatory instance?
+4. **Clawdbot PR:** Should Observatory client be merged into Clawdbot core?
 
 ---
 
 ## Next Steps
 
-1. Review this plan — anything missing for your use cases?
-2. Decide on storage backend (SQLite fine for start)
-3. Start with Phase 1: instrument Clawdbot gateway
-4. I can help write the instrumentation code once we agree on the plan
+1. ✅ Plan revised for Docker-first, self-hosted deployment
+2. 🚧 Start Phase 1: Scaffold project, Docker setup, ingest API
+3. Create Clawdbot integration spec for Phase 3
