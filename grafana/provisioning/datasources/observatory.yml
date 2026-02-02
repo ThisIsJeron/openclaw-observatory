@@ -1,0 +1,19 @@
+apiVersion: 1
+
+datasources:
+  - name: Observatory
+    type: postgres
+    url: timescaledb:5432
+    database: observatory
+    user: observatory
+    secureJsonData:
+      password: observatory
+    jsonData:
+      sslmode: disable
+      maxOpenConns: 10
+      maxIdleConns: 10
+      connMaxLifetime: 14400
+      postgresVersion: 1600
+      timescaledb: true
+    isDefault: true
+    editable: false
