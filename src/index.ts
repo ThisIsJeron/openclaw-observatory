@@ -41,7 +41,6 @@ async function main() {
   await app.register(fastifyStatic, {
     root: webDistPath,
     prefix: '/',
-    decorateReply: false,
   });
 
   // Initialize database with retry
