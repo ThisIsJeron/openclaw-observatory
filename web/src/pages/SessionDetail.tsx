@@ -3,6 +3,7 @@ import { useSession, useSessionEvents } from '../hooks/useApi';
 import StatusBadge from '../components/StatusBadge';
 import ContextBar from '../components/ContextBar';
 import EventTimeline from '../components/EventTimeline';
+import TurnMetricsChart from '../components/TurnMetricsChart';
 
 export default function SessionDetail() {
   const { sessionKey } = useParams<{ sessionKey: string }>();
@@ -30,6 +31,14 @@ export default function SessionDetail() {
   }
 
   const events = eventsData?.events || [];
+
+  // Compute derived metrics from events
+  const turnEvents = events.filter((e) => e.eventType === 'turn.completed');
+  const totalTokens = turnEvents.reduce((sum, e) => {
+    return sum + (e.tokens?.input ?? 0) + (e.tokens?.output ?? 0);
+  }, 0);
+  const avgCostPerTurn = session.turnCount > 0 ? session.totalCost / session.turnCount : 0;
+  const avgTokensPerTurn = turnEvents.length > 0 ? totalTokens / turnEvents.length : 0;
 
   return (
     <div className="space-y-6">
@@ -62,7 +71,7 @@ export default function SessionDetail() {
       </div>
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
         <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
           <div className="text-sm text-slate-400 mb-1">Gateway</div>
           <div className="text-lg font-medium text-white">{session.gatewayId}</div>
@@ -84,6 +93,14 @@ export default function SessionDetail() {
           <div className="text-sm text-slate-400 mb-1">Total Cost</div>
           <div className="text-lg font-medium text-white">${session.totalCost.toFixed(4)}</div>
         </div>
+        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+          <div className="text-sm text-slate-400 mb-1">Total Tokens</div>
+          <div className="text-lg font-medium text-white">{totalTokens.toLocaleString()}</div>
+        </div>
+        <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+          <div className="text-sm text-slate-400 mb-1">Avg Cost/Turn</div>
+          <div className="text-lg font-medium text-white">${avgCostPerTurn.toFixed(4)}</div>
+        </div>
       </div>
 
       {/* Context Usage */}
@@ -95,6 +112,20 @@ export default function SessionDetail() {
           percent={session.maxContextPercent}
           showLabels
         />
+      </div>
+
+      {/* Turn Metrics Chart */}
+      <div className="bg-slate-800 rounded-lg p-4 border border-slate-700">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-white">Turn Metrics</h2>
+          {turnEvents.length > 0 && (
+            <div className="flex gap-4 text-sm text-slate-400">
+              <span>Avg {avgTokensPerTurn.toLocaleString(undefined, { maximumFractionDigits: 0 })} tokens/turn</span>
+              <span>Avg ${avgCostPerTurn.toFixed(4)}/turn</span>
+            </div>
+          )}
+        </div>
+        <TurnMetricsChart events={events} />
       </div>
 
       {/* Timeline */}

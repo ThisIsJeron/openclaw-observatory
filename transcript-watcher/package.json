@@ -1,0 +1,13 @@
+{
+  "name": "openclaw-transcript-watcher",
+  "version": "1.0.0",
+  "description": "Watch OpenClaw transcripts and extract turn metrics for Observatory",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "chokidar": "^3.5.3"
+  }
+}
